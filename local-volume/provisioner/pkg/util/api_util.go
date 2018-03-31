@@ -22,6 +22,7 @@ import (
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/cache"
 
 	"k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,6 +35,15 @@ type APIUtil interface {
 
 	// Delete PersistentVolume object
 	DeletePV(pvName string) error
+
+	// Get StorageClass object
+	GetStorageClass(className string) (*storagev1.StorageClass, error)
+
+	// Update StorageClass object
+	UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error)
+
+	// Update PVC object
+	UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error)
 }
 
 var _ APIUtil = &apiUtil{}
@@ -57,6 +67,21 @@ func (u *apiUtil) DeletePV(pvName string) error {
 	return u.client.CoreV1().PersistentVolumes().Delete(pvName, &metav1.DeleteOptions{})
 }
 
+// GetStorageClass will get a StorageClass object
+func (u *apiUtil) GetStorageClass(className string) (*storagev1.StorageClass, error) {
+	return u.client.StorageV1().StorageClasses().Get(className, metav1.GetOptions{})
+}
+
+// GetStorageClass will update given StorageClass object
+func (u *apiUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+	return u.client.StorageV1().StorageClasses().Update(class)
+}
+
+// UpdatePVC will update given PVC object
+func (u *apiUtil) UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error) {
+	return u.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
+}
+
 var _ APIUtil = &FakeAPIUtil{}
 
 // FakeAPIUtil is a fake API wrapper for unit testing
@@ -65,15 +90,17 @@ type FakeAPIUtil struct {
 	deletedPVs map[string]*v1.PersistentVolume
 	shouldFail bool
 	cache      *cache.VolumeCache
+	classes    map[string]*storagev1.StorageClass
 }
 
 // NewFakeAPIUtil returns an APIUtil object that can be used for unit testing
-func NewFakeAPIUtil(shouldFail bool, cache *cache.VolumeCache) *FakeAPIUtil {
+func NewFakeAPIUtil(shouldFail bool, cache *cache.VolumeCache, scs map[string]*storagev1.StorageClass) *FakeAPIUtil {
 	return &FakeAPIUtil{
 		createdPVs: map[string]*v1.PersistentVolume{},
 		deletedPVs: map[string]*v1.PersistentVolume{},
 		shouldFail: shouldFail,
 		cache:      cache,
+		classes:    scs,
 	}
 }
 
@@ -102,6 +129,29 @@ func (u *FakeAPIUtil) DeletePV(pvName string) error {
 		return nil
 	}
 	return errors.NewNotFound(v1.Resource("persistentvolumes"), pvName)
+}
+
+func (u *FakeAPIUtil) GetStorageClass(className string) (*storagev1.StorageClass, error) {
+	class, ok := u.classes[className]
+	if !ok {
+		return nil, nil
+	}
+	return class.DeepCopy(), nil
+}
+
+func (u *FakeAPIUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+	if u.shouldFail {
+		return nil, fmt.Errorf("API failed")
+	}
+	u.classes[class.Name] = class
+	return class, nil
+}
+
+func (u *FakeAPIUtil) UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error) {
+	if u.shouldFail {
+		return nil, fmt.Errorf("API failed")
+	}
+	return pvc, nil
 }
 
 // GetAndResetCreatedPVs returns createdPVs and resets the map

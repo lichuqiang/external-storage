@@ -22,12 +22,11 @@ import (
 	"path/filepath"
 
 	"github.com/golang/glog"
-	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/common"
-
 	esUtil "github.com/kubernetes-incubator/external-storage/lib/util"
-	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/deleter"
+	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/common"
 	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
+	"k8s.io/kubernetes/pkg/util/mount"
 )
 
 // Discoverer finds available volumes and creates PVs for them
@@ -37,14 +36,14 @@ type Discoverer struct {
 	Labels map[string]string
 	// ProcTable is a reference to running processes so that we can prevent PV from being created while
 	// it is being cleaned
-	ProcTable       deleter.ProcTable
+	ProcTable       common.ProcTable
 	nodeAffinityAnn string
 	nodeAffinity    *v1.VolumeNodeAffinity
 }
 
 // NewDiscoverer creates a Discoverer object that will scan through
 // the configured directories and create local PVs for any new directories found
-func NewDiscoverer(config *common.RuntimeConfig, procTable deleter.ProcTable) (*Discoverer, error) {
+func NewDiscoverer(config *common.RuntimeConfig, procTable common.ProcTable) (*Discoverer, error) {
 	labelMap := make(map[string]string)
 	for _, labelName := range config.NodeLabelsForPV {
 		labelVal, ok := config.Node.Labels[labelName]
@@ -54,7 +53,7 @@ func NewDiscoverer(config *common.RuntimeConfig, procTable deleter.ProcTable) (*
 	}
 
 	if config.UseAlphaAPI {
-		nodeAffinity, err := generateNodeAffinity(config.Node)
+		nodeAffinity, err := common.GenerateNodeAffinity(config.Node)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to generate node affinity: %v", err)
 		}
@@ -70,7 +69,7 @@ func NewDiscoverer(config *common.RuntimeConfig, procTable deleter.ProcTable) (*
 			nodeAffinityAnn: tmpAnnotations[v1.AlphaStorageNodeAffinityAnnotation]}, nil
 	}
 
-	volumeNodeAffinity, err := generateVolumeNodeAffinity(config.Node)
+	volumeNodeAffinity, err := common.GenerateVolumeNodeAffinity(config.Node)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to generate volume node affinity: %v", err)
 	}
@@ -82,58 +81,6 @@ func NewDiscoverer(config *common.RuntimeConfig, procTable deleter.ProcTable) (*
 		nodeAffinity:  volumeNodeAffinity}, nil
 }
 
-func generateNodeAffinity(node *v1.Node) (*v1.NodeAffinity, error) {
-	if node.Labels == nil {
-		return nil, fmt.Errorf("Node does not have labels")
-	}
-	nodeValue, found := node.Labels[common.NodeLabelKey]
-	if !found {
-		return nil, fmt.Errorf("Node does not have expected label %s", common.NodeLabelKey)
-	}
-
-	return &v1.NodeAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
-			NodeSelectorTerms: []v1.NodeSelectorTerm{
-				{
-					MatchExpressions: []v1.NodeSelectorRequirement{
-						{
-							Key:      common.NodeLabelKey,
-							Operator: v1.NodeSelectorOpIn,
-							Values:   []string{nodeValue},
-						},
-					},
-				},
-			},
-		},
-	}, nil
-}
-
-func generateVolumeNodeAffinity(node *v1.Node) (*v1.VolumeNodeAffinity, error) {
-	if node.Labels == nil {
-		return nil, fmt.Errorf("Node does not have labels")
-	}
-	nodeValue, found := node.Labels[common.NodeLabelKey]
-	if !found {
-		return nil, fmt.Errorf("Node does not have expected label %s", common.NodeLabelKey)
-	}
-
-	return &v1.VolumeNodeAffinity{
-		Required: &v1.NodeSelector{
-			NodeSelectorTerms: []v1.NodeSelectorTerm{
-				{
-					MatchExpressions: []v1.NodeSelectorRequirement{
-						{
-							Key:      common.NodeLabelKey,
-							Operator: v1.NodeSelectorOpIn,
-							Values:   []string{nodeValue},
-						},
-					},
-				},
-			},
-		},
-	}, nil
-}
-
 // DiscoverLocalVolumes reads the configured discovery paths, and creates PVs for the new volumes
 func (d *Discoverer) DiscoverLocalVolumes() {
 	for class, config := range d.DiscoveryMap {
@@ -141,7 +88,7 @@ func (d *Discoverer) DiscoverLocalVolumes() {
 	}
 }
 
-func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConfig) {
+func (d *Discoverer) discoverVolumesAtPath(class string, config common.DiscoveryConfig) {
 	glog.V(7).Infof("Discovering volumes at hostpath %q, mount path %q for storage class %q", config.HostDir, config.MountDir, class)
 
 	files, err := d.VolUtil.ReadDir(config.MountDir)
@@ -195,6 +142,16 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 				glog.Errorf("Path %q block stats error: %v", filePath, err)
 				continue
 			}
+			// Check if device still in state of mounted
+			refs, err := getMountRefsByDev(mountPoints, filePath)
+			if err != nil {
+				glog.Errorf("Error retreiving mounting information of %s: %v", filePath, err)
+				continue
+			}
+			if len(refs) > 0 {
+				glog.Errorf("Path %s still mounted, skipping...", filePath)
+				continue
+			}
 		case v1.PersistentVolumeFilesystem:
 			// Validate that this path is an actual mountpoint
 			if _, isMntPnt := mountPointMap[filePath]; isMntPnt == false {
@@ -211,7 +168,7 @@ func (d *Discoverer) discoverVolumesAtPath(class string, config common.MountConf
 			continue
 		}
 
-		d.createPV(file, class, config, capacityByte, volMode)
+		d.createPV(file, class, config, capacityByte)
 	}
 }
 
@@ -246,21 +203,25 @@ func generatePVName(file, node, class string) string {
 	return fmt.Sprintf("local-pv-%x", h.Sum32())
 }
 
-func (d *Discoverer) createPV(file, class string, config common.MountConfig, capacityByte int64, volMode v1.PersistentVolumeMode) {
+func (d *Discoverer) createPV(file, class string, config common.DiscoveryConfig, capacityByte int64) {
 	pvName := generatePVName(file, d.Node.Name, class)
 	outsidePath := filepath.Join(config.HostDir, file)
 
 	glog.Infof("Found new volume of volumeMode %q at host path %q with capacity %d, creating Local PV %q",
-		volMode, outsidePath, capacityByte, pvName)
+		config.VolumeMode, outsidePath, capacityByte, pvName)
 
 	localPVConfig := &common.LocalPVConfig{
-		Name:            pvName,
-		HostPath:        outsidePath,
-		Capacity:        roundDownCapacityPretty(capacityByte),
-		StorageClass:    class,
-		ProvisionerName: d.Name,
-		VolumeMode:      volMode,
-		Labels:          d.Labels,
+		Name:           pvName,
+		HostPath:       outsidePath,
+		Capacity:       roundDownCapacityPretty(capacityByte),
+		StorageClass:   class,
+		ProvisionerTag: d.Tag,
+		VolumeMode:     config.VolumeMode,
+		Labels:         d.Labels,
+		AccessModes: []v1.PersistentVolumeAccessMode{
+			v1.ReadWriteOnce,
+		},
+		AdditionalAnn: map[string]string{},
 	}
 
 	if d.UseAlphaAPI {
@@ -295,4 +256,31 @@ func roundDownCapacityPretty(capacityBytes int64) int64 {
 		}
 	}
 	return capacityBytes
+}
+
+func getMountRefsByDev(mps []mount.MountPoint, mountPath string) ([]string, error) {
+	slTarget, err := filepath.EvalSymlinks(mountPath)
+	if err != nil {
+		slTarget = mountPath
+	}
+
+	// Finding the device mounted to mountPath
+	diskDev := ""
+	for i := range mps {
+		if slTarget == mps[i].Path {
+			diskDev = mps[i].Device
+			break
+		}
+	}
+
+	// Find all references to the device.
+	var refs []string
+	for i := range mps {
+		if mps[i].Device == diskDev || mps[i].Device == slTarget {
+			if mps[i].Path != slTarget {
+				refs = append(refs, mps[i].Path)
+			}
+		}
+	}
+	return refs, nil
 }

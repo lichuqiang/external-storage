@@ -53,7 +53,7 @@ type testConfig struct {
 	volUtil   *util.FakeVolumeUtil
 	apiUtil   *util.FakeAPIUtil
 	cache     *cache.VolumeCache
-	procTable *FakeProcTableImpl
+	procTable *common.FakeProcTableImpl
 }
 
 type testVol struct {
@@ -307,8 +307,8 @@ func TestDeleteBlock_DuplicateAttempts(t *testing.T) {
 
 func testSetup(t *testing.T, config *testConfig, cleanupCmd []string) *Deleter {
 	config.cache = cache.NewVolumeCache()
-	config.apiUtil = util.NewFakeAPIUtil(false, config.cache)
-	config.procTable = NewFakeProcTable()
+	config.apiUtil = util.NewFakeAPIUtil(false, config.cache, nil)
+	config.procTable = common.NewFakeProcTable()
 	config.volUtil = util.NewFakeVolumeUtil(config.volDeleteShouldFail, map[string][]*util.FakeDirEntry{})
 
 	// Precreate PVs
@@ -347,14 +347,16 @@ func testSetup(t *testing.T, config *testConfig, cleanupCmd []string) *Deleter {
 	// Update volume util
 	config.volUtil.AddNewDirEntries(testMountDir, newVols)
 
-	config.apiUtil = util.NewFakeAPIUtil(config.apiShouldFail, config.cache)
+	config.apiUtil = util.NewFakeAPIUtil(config.apiShouldFail, config.cache, nil)
 
 	userConfig := &common.UserConfig{
-		DiscoveryMap: map[string]common.MountConfig{
+		DiscoveryMap: map[string]common.DiscoveryConfig{
 			testStorageClass: {
-				HostDir:             testHostDir,
-				MountDir:            testMountDir,
-				BlockCleanerCommand: cleanupCmd,
+				MountConfig: &common.MountConfig{
+					HostDir:             testHostDir,
+					MountDir:            testMountDir,
+					BlockCleanerCommand: cleanupCmd,
+				},
 			},
 		},
 	}
@@ -369,7 +371,7 @@ func testSetup(t *testing.T, config *testConfig, cleanupCmd []string) *Deleter {
 		Recorder:   fakeRecorder,
 	}
 
-	return NewDeleter(runtimeConfig, config.procTable)
+	return NewDeleter(runtimeConfig, config.procTable, func(*v1.PersistentVolume) error { return nil })
 }
 
 func verifyDeletedPVs(t *testing.T, config *testConfig) {

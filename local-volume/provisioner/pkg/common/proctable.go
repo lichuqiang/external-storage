@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package deleter
+package common
 
 import (
 	"fmt"
@@ -24,11 +24,10 @@ import (
 
 // ProcTable Interface for tracking running processes
 type ProcTable interface {
-	// CleanupBlockPV deletes block based PV
-	IsRunning(pvName string) bool
+	IsRunning(objName string) bool
 	IsEmpty() bool
-	MarkRunning(pvName string) error
-	MarkDone(pvName string)
+	MarkRunning(objName string) error
+	MarkDone(objName string)
 }
 
 var _ ProcTable = &ProcTableImpl{}
@@ -50,10 +49,10 @@ func NewProcTable() *ProcTableImpl {
 }
 
 // IsRunning Check if cleanup process is still running
-func (v *ProcTableImpl) IsRunning(pvName string) bool {
+func (v *ProcTableImpl) IsRunning(objName string) bool {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	_, ok := v.procTable[pvName]
+	_, ok := v.procTable[objName]
 	return ok
 }
 
@@ -65,22 +64,22 @@ func (v *ProcTableImpl) IsEmpty() bool {
 }
 
 // MarkRunning Indicate that process is running.
-func (v *ProcTableImpl) MarkRunning(pvName string) error {
+func (v *ProcTableImpl) MarkRunning(objName string) error {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	_, ok := v.procTable[pvName]
+	_, ok := v.procTable[objName]
 	if ok {
-		return fmt.Errorf("Failed to mark running of %q as it is already running, should never happen", pvName)
+		return fmt.Errorf("Failed to mark running of %q as it is already running, should never happen", objName)
 	}
-	v.procTable[pvName] = ProcEntry{StartTime: time.Now()}
+	v.procTable[objName] = ProcEntry{StartTime: time.Now()}
 	return nil
 }
 
 // MarkDone Indicate the process is no longer running or being tracked.
-func (v *ProcTableImpl) MarkDone(pvName string) {
+func (v *ProcTableImpl) MarkDone(objName string) {
 	v.mutex.Lock()
 	defer v.mutex.Unlock()
-	delete(v.procTable, pvName)
+	delete(v.procTable, objName)
 }
 
 // FakeProcTableImpl creates a mock proc table that enables testing.
@@ -102,9 +101,9 @@ func NewFakeProcTable() *FakeProcTableImpl {
 }
 
 // IsRunning Check if cleanup process is still running
-func (f *FakeProcTableImpl) IsRunning(pvName string) bool {
+func (f *FakeProcTableImpl) IsRunning(objName string) bool {
 	f.IsRunningCount++
-	return f.realTable.IsRunning(pvName)
+	return f.realTable.IsRunning(objName)
 }
 
 // IsEmpty Check if any cleanup process is running
@@ -113,13 +112,13 @@ func (f *FakeProcTableImpl) IsEmpty() bool {
 }
 
 // MarkRunning Indicate that process is running.
-func (f *FakeProcTableImpl) MarkRunning(pvName string) error {
+func (f *FakeProcTableImpl) MarkRunning(objName string) error {
 	f.MarkRunningCount++
-	return f.realTable.MarkRunning(pvName)
+	return f.realTable.MarkRunning(objName)
 }
 
 // MarkDone Indicate the process is no longer running or being tracked.
-func (f *FakeProcTableImpl) MarkDone(pvName string) {
+func (f *FakeProcTableImpl) MarkDone(objName string) {
 	f.MarkDoneCount++
-	f.realTable.MarkDone(pvName)
+	f.realTable.MarkDone(objName)
 }

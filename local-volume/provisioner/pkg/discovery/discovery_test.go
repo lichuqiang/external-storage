@@ -35,10 +35,10 @@ import (
 )
 
 const (
-	testHostDir         = "/mnt/disks"
-	testMountDir        = "/discoveryPath"
-	testNodeName        = "test-node"
-	testProvisionerName = "test-provisioner"
+	testHostDir        = "/mnt/disks"
+	testMountDir       = "/discoveryPath"
+	testNodeName       = "test-node"
+	testProvisionerTag = "test-provisioner"
 )
 
 var nodeLabels = map[string]string{
@@ -89,7 +89,7 @@ type testConfig struct {
 	volUtil   *util.FakeVolumeUtil
 	apiUtil   *util.FakeAPIUtil
 	cache     *cache.VolumeCache
-	procTable *deleter.ProcTableImpl
+	procTable *common.ProcTableImpl
 }
 
 func TestDiscoverVolumes_Basic(t *testing.T) {
@@ -310,7 +310,7 @@ func testSetup(t *testing.T, test *testConfig, useAlphaAPI bool) *Discoverer {
 		Cache:      test.cache,
 		VolUtil:    test.volUtil,
 		APIUtil:    test.apiUtil,
-		Name:       testProvisionerName,
+		Tag:        testProvisionerTag,
 		Mounter:    fm,
 	}
 	d, err := NewDiscoverer(runConfig, test.procTable)
@@ -399,13 +399,13 @@ func verifyProvisionerName(t *testing.T, pv *v1.PersistentVolume) {
 		t.Errorf("Annotations not set")
 		return
 	}
-	name, found := pv.Annotations[common.AnnProvisionedBy]
+	tag, found := pv.Annotations[common.AnnProvisionedBy]
 	if !found {
 		t.Errorf("Provisioned by annotations not set")
 		return
 	}
-	if name != testProvisionerName {
-		t.Errorf("Provisioned name is %q, expected %q", name, testProvisionerName)
+	if tag != testProvisionerTag {
+		t.Errorf("Provisioned name is %q, expected %q", tag, testProvisionerTag)
 	}
 }
 

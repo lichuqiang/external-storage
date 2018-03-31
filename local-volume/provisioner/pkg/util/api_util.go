@@ -22,6 +22,7 @@ import (
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/cache"
 
 	"k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,6 +35,15 @@ type APIUtil interface {
 
 	// Delete PersistentVolume object
 	DeletePV(pvName string) error
+
+	// Get StorageClass object
+	GetStorageClass(className string) (*storagev1.StorageClass, error)
+
+	// Update StorageClass object
+	UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error)
+
+	// Update PVC object
+	UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error)
 }
 
 var _ APIUtil = &apiUtil{}
@@ -55,6 +65,21 @@ func (u *apiUtil) CreatePV(pv *v1.PersistentVolume) (*v1.PersistentVolume, error
 // DeletePV will delete a PersistentVolume
 func (u *apiUtil) DeletePV(pvName string) error {
 	return u.client.CoreV1().PersistentVolumes().Delete(pvName, &metav1.DeleteOptions{})
+}
+
+// GetStorageClass will get a StorageClass object
+func (u *apiUtil) GetStorageClass(className string) (*storagev1.StorageClass, error) {
+	return u.client.StorageV1().StorageClasses().Get(className, metav1.GetOptions{})
+}
+
+// GetStorageClass will update given StorageClass object
+func (u *apiUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+	return u.client.StorageV1().StorageClasses().Update(class)
+}
+
+// UpdatePVC will update given PVC object
+func (u *apiUtil) UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error) {
+	return u.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(pvc)
 }
 
 var _ APIUtil = &FakeAPIUtil{}
@@ -102,6 +127,18 @@ func (u *FakeAPIUtil) DeletePV(pvName string) error {
 		return nil
 	}
 	return errors.NewNotFound(v1.Resource("persistentvolumes"), pvName)
+}
+
+func (u *FakeAPIUtil) GetStorageClass(className string) (*storagev1.StorageClass, error) {
+	return &storagev1.StorageClass{}, nil
+}
+
+func (u *FakeAPIUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+	return class, nil
+}
+
+func (u *FakeAPIUtil) UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error) {
+	return pvc, nil
 }
 
 // GetAndResetCreatedPVs returns createdPVs and resets the map

@@ -27,6 +27,7 @@ import (
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/deleter"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/discovery"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/populator"
+	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/storagemanager"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/util"
 
 	"k8s.io/api/core/v1"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubernetes/pkg/util/mount"
 )
 
@@ -41,33 +43,40 @@ import (
 func StartLocalController(client *kubernetes.Clientset, config *common.UserConfig) {
 	glog.Info("Initializing volume cache\n")
 
-	provisionerName := fmt.Sprintf("local-volume-provisioner-%v-%v", config.Node.Name, config.Node.UID)
+	provisionerTag := fmt.Sprintf("local-volume-provisioner-%v-%v", config.Node.Name, config.Node.UID)
 
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(client.CoreV1().RESTClient()).Events("")})
-	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: provisionerName})
+	recorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: provisionerTag})
 
 	runtimeConfig := &common.RuntimeConfig{
-		UserConfig: config,
-		Cache:      cache.NewVolumeCache(),
-		VolUtil:    util.NewVolumeUtil(),
-		APIUtil:    util.NewAPIUtil(client),
-		Client:     client,
-		Name:       provisionerName,
-		Recorder:   recorder,
-		Mounter:    mount.New("" /* default mount path */),
+		UserConfig:     config,
+		Cache:          cache.NewVolumeCache(),
+		VolUtil:        util.NewVolumeUtil(),
+		APIUtil:        util.NewAPIUtil(client),
+		Client:         client,
+		Tag:            provisionerTag,
+		Recorder:       recorder,
+		Mounter:        mount.New("" /* default mount path */),
+		ProvisionQueue: workqueue.NewNamed("claimsToProvision"),
 	}
 
 	populator := populator.NewPopulator(runtimeConfig)
 	populator.Start()
 
-	ptable := deleter.NewProcTable()
-	discoverer, err := discovery.NewDiscoverer(runtimeConfig, ptable)
+	deletePtable := common.NewProcTable()
+	discoverer, err := discovery.NewDiscoverer(runtimeConfig, deletePtable)
 	if err != nil {
 		glog.Fatalf("Error starting discoverer: %v", err)
 	}
 
-	deleter := deleter.NewDeleter(runtimeConfig, ptable)
+	storageManager, err := storagemanager.NewStorageManager(runtimeConfig)
+	if err != nil {
+		glog.Fatalf("Error starting storage manager: %v", err)
+	}
+	storageManager.Start()
+
+	deleter := deleter.NewDeleter(runtimeConfig, deletePtable, storageManager.DeleteLocalVolume)
 
 	glog.Info("Controller started\n")
 	for {

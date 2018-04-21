@@ -25,7 +25,6 @@ import (
 	esUtil "github.com/kubernetes-incubator/external-storage/lib/util"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/cache"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/common"
-	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/deleter"
 	"github.com/kubernetes-incubator/external-storage/local-volume/provisioner/pkg/util"
 
 	"k8s.io/api/core/v1"
@@ -35,10 +34,10 @@ import (
 )
 
 const (
-	testHostDir         = "/mnt/disks"
-	testMountDir        = "/discoveryPath"
-	testNodeName        = "test-node"
-	testProvisionerName = "test-provisioner"
+	testHostDir        = "/mnt/disks"
+	testMountDir       = "/discoveryPath"
+	testNodeName       = "test-node"
+	testProvisionerTag = "test-provisioner"
 )
 
 var nodeLabels = map[string]string{
@@ -65,14 +64,18 @@ var testNode = &v1.Node{
 	},
 }
 
-var scMapping = map[string]common.MountConfig{
+var scMapping = map[string]common.DiscoveryConfig{
 	"sc1": {
-		HostDir:  testHostDir + "/dir1",
-		MountDir: testMountDir + "/dir1",
+		MountConfig: &common.MountConfig{
+			HostDir:  testHostDir + "/dir1",
+			MountDir: testMountDir + "/dir1",
+		},
 	},
 	"sc2": {
-		HostDir:  testHostDir + "/dir2",
-		MountDir: testMountDir + "/dir2",
+		MountConfig: &common.MountConfig{
+			HostDir:  testHostDir + "/dir2",
+			MountDir: testMountDir + "/dir2",
+		},
 	},
 }
 
@@ -89,7 +92,7 @@ type testConfig struct {
 	volUtil   *util.FakeVolumeUtil
 	apiUtil   *util.FakeAPIUtil
 	cache     *cache.VolumeCache
-	procTable *deleter.ProcTableImpl
+	procTable *common.ProcTableImpl
 }
 
 func TestDiscoverVolumes_Basic(t *testing.T) {
@@ -283,8 +286,8 @@ func testSetup(t *testing.T, test *testConfig, useAlphaAPI bool) *Discoverer {
 	test.cache = cache.NewVolumeCache()
 	test.volUtil = util.NewFakeVolumeUtil(false /*deleteShouldFail*/, map[string][]*util.FakeDirEntry{})
 	test.volUtil.AddNewDirEntries(testMountDir, test.dirLayout)
-	test.apiUtil = util.NewFakeAPIUtil(test.apiShouldFail, test.cache)
-	test.procTable = deleter.NewProcTable()
+	test.apiUtil = util.NewFakeAPIUtil(test.apiShouldFail, test.cache, nil)
+	test.procTable = common.NewProcTable()
 
 	fm := &mount.FakeMounter{
 		MountPoints: []mount.MountPoint{
@@ -296,6 +299,9 @@ func testSetup(t *testing.T, test *testConfig, useAlphaAPI bool) *Discoverer {
 			{Path: "/discoveryPath/dir2"},
 			{Path: "/discoveryPath/dir1/mount3"},
 			{Path: "/discoveryPath/dir1/mount4"},
+			{Path: "/discoveryPath/dir1/symlink2", Device: "device1"},
+			{Path: "/discoveryPath/dir2/symlink2", Device: "device2"},
+			{Path: "/discoveryPath/dir1/symlink3", Device: "device3"},
 		},
 	}
 
@@ -310,7 +316,7 @@ func testSetup(t *testing.T, test *testConfig, useAlphaAPI bool) *Discoverer {
 		Cache:      test.cache,
 		VolUtil:    test.volUtil,
 		APIUtil:    test.apiUtil,
-		Name:       testProvisionerName,
+		Tag:        testProvisionerTag,
 		Mounter:    fm,
 	}
 	d, err := NewDiscoverer(runConfig, test.procTable)
@@ -399,13 +405,13 @@ func verifyProvisionerName(t *testing.T, pv *v1.PersistentVolume) {
 		t.Errorf("Annotations not set")
 		return
 	}
-	name, found := pv.Annotations[common.AnnProvisionedBy]
+	tag, found := pv.Annotations[common.AnnProvisionedBy]
 	if !found {
 		t.Errorf("Provisioned by annotations not set")
 		return
 	}
-	if name != testProvisionerName {
-		t.Errorf("Provisioned name is %q, expected %q", name, testProvisionerName)
+	if tag != testProvisionerTag {
+		t.Errorf("Provisioned name is %q, expected %q", tag, testProvisionerTag)
 	}
 }
 

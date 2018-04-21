@@ -36,6 +36,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubernetes/pkg/kubelet/apis"
 	"k8s.io/kubernetes/pkg/util/mount"
 )
@@ -43,12 +44,25 @@ import (
 const (
 	// AnnProvisionedBy is the external provisioner annotation in PV object
 	AnnProvisionedBy = "pv.kubernetes.io/provisioned-by"
+	// AnnSelectedNode is added to a PVC that has been triggered by scheduler to
+	// be dynamically provisioned. Its value is the name of the selected node.
+	AnnSelectedNode = "volume.alpha.kubernetes.io/selected-node"
+	// This annotation is added to a PVC that is supposed to be dynamically
+	// provisioned. Its value is name of volume plugin that is supposed to provision
+	// a volume for this PVC.
+	AnnStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
 	// NodeLabelKey is the label key that this provisioner uses for PV node affinity
 	// hostname is not the best choice, but it's what pod and node affinity also use
 	NodeLabelKey = apis.LabelHostname
+	// This annotation is added to dynamically provisioned PVs, so that the scheduler
+	// can easily calculate the usage of the capacity.
+	AnnProvisionedTopology = "volume.alpha.kubernetes.io/provisioned-topology"
 
 	// DefaultBlockCleanerCommand is the default block device cleaning command
 	DefaultBlockCleanerCommand = "/scripts/quick_reset.sh"
+
+	// DefaultVolumeMode is the default volume mode of discovered volumes
+	DefaultVolumeMode = "Filesystem"
 
 	// EventVolumeFailedDelete copied from k8s.io/kubernetes/pkg/controller/volume/events
 	EventVolumeFailedDelete = "VolumeFailedDelete"
@@ -68,35 +82,88 @@ const (
 	LocalPVEnv = "LOCAL_PV_BLKDEVICE"
 	// KubeConfigEnv will (optionally) specify the location of kubeconfig file on the node.
 	KubeConfigEnv = "KUBECONFIG"
+
+	// TODO: make the paths configurable if needed
+	LvmRootPath    = "/dev"
+	LvmMountedPath = "/dev"
 )
 
 // UserConfig stores all the user-defined parameters to the provisioner
 type UserConfig struct {
 	// Node object for this node
 	Node *v1.Node
+	// Name of the provisioner
+	ProvisionerName string
 	// key = storageclass, value = mount configuration for the storageclass
-	DiscoveryMap map[string]MountConfig
+	DiscoveryMap map[string]DiscoveryConfig
+	// key = storageclass, value = provision source configuration for the storageclass
+	ProvisionSourceMap map[string]ProvisionSourceConfig
 	// Labels and their values that are added to PVs created by the provisioner
 	NodeLabelsForPV []string
 	// UseAlphaAPI shows if we need to use alpha API
 	UseAlphaAPI bool
 }
 
-// MountConfig stores a configuration for discoverying a specific storageclass
-type MountConfig struct {
+// StorageClassConfig stores a configuration for discoverying and provisioning a specific storageclass
+type StorageClassConfig struct {
 	// The hostpath directory
 	HostDir string `json:"hostDir" yaml:"hostDir"`
 	// The mount point of the hostpath volume
 	MountDir string `json:"mountDir" yaml:"mountDir"`
 	// The type of block cleaner to use
 	BlockCleanerCommand []string `json:"blockCleanerCommand" yaml:"blockCleanerCommand"`
+	// Intended volume mode of discovered volumes
+	VolumeMode string `json:"volumeMode" yaml:"volumeMode"`
+	// Configuration for dynamically provisioning with lvm
+	Lvm LvmSource `json:"lvm" yaml:"lvm"`
+
+	// placeholder for other potential sources
+}
+
+// LvmSource stores source of provisioning for LVM
+type LvmSource struct {
+	// Volume group name of the source
+	VolumeGroup string `json:"volumeGroup" yaml:"volumeGroup"`
+}
+
+// Used for test
+type FakeSource struct {
+	Capacity int64
+	RootPath string
+}
+
+// MountConfig stores a pair of mounted paths, along with potential cleanup commands.
+type MountConfig struct {
+	// The hostpath directory
+	HostDir string
+	// The mount point of the hostpath volume
+	MountDir string
+	// The type of block cleaner to use
+	BlockCleanerCommand []string
+}
+
+// DiscoveryConfig stores a configuration for discoverying a specific storageclass
+type DiscoveryConfig struct {
+	*MountConfig
+	// Intended volume mode of discovered volumes
+	VolumeMode v1.PersistentVolumeMode
+}
+
+// ProvisionSourceConfig stores a configuration for provisioning a specific storageclass
+type ProvisionSourceConfig struct {
+	*MountConfig
+	// Source of provisioning for LVM
+	Lvm *LvmSource
+
+	Fake *FakeSource
+	// placeholder for other potential sources
 }
 
 // RuntimeConfig stores all the objects that the provisioner needs to run
 type RuntimeConfig struct {
 	*UserConfig
-	// Unique name of this provisioner
-	Name string
+	// Unique tag of this provisioner
+	Tag string
 	// K8s API client
 	Client *kubernetes.Clientset
 	// Cache to store PVs managed by this provisioner
@@ -111,20 +178,26 @@ type RuntimeConfig struct {
 	BlockDisabled bool
 	// Mounter used to verify mountpoints
 	Mounter mount.Interface
+	// Queue to trigger dynamic provision
+	ProvisionQueue *workqueue.Type
 }
 
 // LocalPVConfig defines the parameters for creating a local PV
 type LocalPVConfig struct {
-	Name            string
-	HostPath        string
-	Capacity        int64
-	StorageClass    string
-	ProvisionerName string
-	UseAlphaAPI     bool
-	AffinityAnn     string
-	NodeAffinity    *v1.VolumeNodeAffinity
-	VolumeMode      v1.PersistentVolumeMode
-	Labels          map[string]string
+	Name           string
+	HostPath       string
+	Capacity       int64
+	StorageClass   string
+	ProvisionerTag string
+	UseAlphaAPI    bool
+	AffinityAnn    string
+	NodeAffinity   *v1.VolumeNodeAffinity
+	VolumeMode     v1.PersistentVolumeMode
+	Labels         map[string]string
+	AccessModes    []v1.PersistentVolumeAccessMode
+	ReclaimPolicy  v1.PersistentVolumeReclaimPolicy
+	AdditionalAnn  map[string]string
+	ClaimRef       *v1.ObjectReference
 }
 
 // BuildConfigFromFlags being defined to enable mocking during unit testing
@@ -139,7 +212,7 @@ var InClusterConfig = rest.InClusterConfig
 // TODO Need to find a way to marshal the struct more efficiently.
 type ProvisionerConfiguration struct {
 	// StorageClassConfig defines configuration of Provisioner's storage classes
-	StorageClassConfig map[string]MountConfig `json:"storageClassMap" yaml:"storageClassMap"`
+	StorageClassConfig map[string]StorageClassConfig `json:"storageClassMap" yaml:"storageClassMap"`
 	// NodeLabelsForPV contains a list of node labels to be copied to the PVs created by the provisioner
 	// +optional
 	NodeLabelsForPV []string `json:"nodeLabelsForPV" yaml:"nodeLabelsForPV"`
@@ -154,11 +227,11 @@ func CreateLocalPVSpec(config *LocalPVConfig) *v1.PersistentVolume {
 			Name:   config.Name,
 			Labels: config.Labels,
 			Annotations: map[string]string{
-				AnnProvisionedBy: config.ProvisionerName,
+				AnnProvisionedBy: config.ProvisionerTag,
 			},
 		},
 		Spec: v1.PersistentVolumeSpec{
-			PersistentVolumeReclaimPolicy: v1.PersistentVolumeReclaimDelete,
+			PersistentVolumeReclaimPolicy: config.ReclaimPolicy,
 			Capacity: v1.ResourceList{
 				v1.ResourceName(v1.ResourceStorage): *resource.NewQuantity(int64(config.Capacity), resource.BinarySI),
 			},
@@ -167,11 +240,10 @@ func CreateLocalPVSpec(config *LocalPVConfig) *v1.PersistentVolume {
 					Path: config.HostPath,
 				},
 			},
-			AccessModes: []v1.PersistentVolumeAccessMode{
-				v1.ReadWriteOnce,
-			},
+			AccessModes:      config.AccessModes,
 			StorageClassName: config.StorageClass,
 			VolumeMode:       &config.VolumeMode,
+			ClaimRef:         config.ClaimRef,
 		},
 	}
 	if config.UseAlphaAPI {
@@ -179,6 +251,11 @@ func CreateLocalPVSpec(config *LocalPVConfig) *v1.PersistentVolume {
 	} else {
 		pv.Spec.NodeAffinity = config.NodeAffinity
 	}
+
+	for key, value := range config.AdditionalAnn {
+		pv.Annotations[key] = value
+	}
+
 	return pv
 }
 
@@ -239,6 +316,7 @@ func ConfigMapDataToVolumeConfig(data map[string]string, provisionerConfig *Prov
 		return fmt.Errorf("fail to Unmarshal yaml due to: %#v", err)
 	}
 	for class, config := range provisionerConfig.StorageClassConfig {
+		// Initialize BlockCleanerCommand
 		if config.BlockCleanerCommand == nil {
 			// Supply a default block cleaner command.
 			config.BlockCleanerCommand = []string{DefaultBlockCleanerCommand}
@@ -248,15 +326,29 @@ func ConfigMapDataToVolumeConfig(data map[string]string, provisionerConfig *Prov
 				return fmt.Errorf("Invalid empty block cleaner command for class %v", class)
 			}
 		}
+		// Initialize VolumeMode
+		if config.VolumeMode == "" {
+			config.VolumeMode = DefaultVolumeMode
+		} else {
+			mode := v1.PersistentVolumeMode(config.VolumeMode)
+			if mode != v1.PersistentVolumeBlock && mode != v1.PersistentVolumeFilesystem {
+				return fmt.Errorf("Storage Class %v is misconfigured, invalid volume mode: %s", class, config.VolumeMode)
+			}
+		}
 		if config.MountDir == "" || config.HostDir == "" {
-			return fmt.Errorf("Storage Class %v is misconfigured, missing HostDir or MountDir parameter", class)
+			if config.Lvm.VolumeGroup == "" {
+				// The config item is for static discovery
+				return fmt.Errorf("Storage Class %v is misconfigured, missing HostDir or MountDir parameter", class)
+			}
 		}
 		provisionerConfig.StorageClassConfig[class] = config
-		glog.Infof("StorageClass %q configured with MountDir %q, HostDir %q, BlockCleanerCommand %q",
+		glog.Infof("StorageClass %q configured with MountDir %q, HostDir %q, BlockCleanerCommand %q, VolumeMode %q, LVM config %v",
 			class,
 			config.MountDir,
 			config.HostDir,
-			config.BlockCleanerCommand)
+			config.BlockCleanerCommand,
+			config.VolumeMode,
+			config.Lvm)
 	}
 	return nil
 }
@@ -294,6 +386,50 @@ func LoadProvisionerConfigs(configPath string, provisionerConfig *ProvisionerCon
 	return ConfigMapDataToVolumeConfig(data, provisionerConfig)
 }
 
+// GetDiscoveryConfigsFromProvisionerConfigs generate a DiscoveryConfig map from ProvisionerConfiguration for volume discovery.
+func GetDiscoveryConfigsFromProvisionerConfigs(provisionerConfig *ProvisionerConfiguration) map[string]DiscoveryConfig {
+	discoveryConfigs := make(map[string]DiscoveryConfig)
+	for class, config := range provisionerConfig.StorageClassConfig {
+		if config.Lvm.VolumeGroup != "" {
+			// Skip config items for dynamically provision
+			continue
+		}
+		discoveryConfig := DiscoveryConfig{
+			MountConfig: &MountConfig{
+				MountDir:            config.MountDir,
+				HostDir:             config.HostDir,
+				BlockCleanerCommand: config.BlockCleanerCommand,
+			},
+			VolumeMode: v1.PersistentVolumeMode(config.VolumeMode),
+		}
+		discoveryConfigs[class] = discoveryConfig
+	}
+	return discoveryConfigs
+}
+
+// GetStorageSourceConfigsFromProvisionerConfigs generate a storage source config map from ProvisionerConfiguration
+// for volume provisioning.
+func GetStorageSourceConfigsFromProvisionerConfigs(provisionerConfig *ProvisionerConfiguration) map[string]ProvisionSourceConfig {
+	sourceConfigs := make(map[string]ProvisionSourceConfig)
+	for class, config := range provisionerConfig.StorageClassConfig {
+		if config.Lvm.VolumeGroup != "" {
+			sourceConfig := ProvisionSourceConfig{
+				Lvm: &LvmSource{
+					VolumeGroup: config.Lvm.VolumeGroup,
+				},
+				MountConfig: &MountConfig{
+					MountDir:            LvmMountedPath,
+					HostDir:             LvmRootPath,
+					BlockCleanerCommand: config.BlockCleanerCommand,
+				},
+			}
+			sourceConfigs[class] = sourceConfig
+		}
+
+	}
+	return sourceConfigs
+}
+
 // SetupClient created client using either in-cluster configuration or if KUBECONFIG environment variable is specified then using that config.
 func SetupClient() *kubernetes.Clientset {
 	var config *rest.Config
@@ -320,4 +456,58 @@ func SetupClient() *kubernetes.Clientset {
 		glog.Fatalf("Error creating clientset: %v\n", err)
 	}
 	return clientset
+}
+
+// GenerateNodeAffinity generate NodeAffinity information basing on given node.
+func GenerateNodeAffinity(node *v1.Node) (*v1.NodeAffinity, error) {
+	if node.Labels == nil {
+		return nil, fmt.Errorf("Node does not have labels")
+	}
+	nodeValue, found := node.Labels[NodeLabelKey]
+	if !found {
+		return nil, fmt.Errorf("Node does not have expected label %s", NodeLabelKey)
+	}
+
+	return &v1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &v1.NodeSelector{
+			NodeSelectorTerms: []v1.NodeSelectorTerm{
+				{
+					MatchExpressions: []v1.NodeSelectorRequirement{
+						{
+							Key:      NodeLabelKey,
+							Operator: v1.NodeSelectorOpIn,
+							Values:   []string{nodeValue},
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
+// GenerateNodeAffinity generate VolumeNodeAffinity information basing on given node.
+func GenerateVolumeNodeAffinity(node *v1.Node) (*v1.VolumeNodeAffinity, error) {
+	if node.Labels == nil {
+		return nil, fmt.Errorf("Node does not have labels")
+	}
+	nodeValue, found := node.Labels[NodeLabelKey]
+	if !found {
+		return nil, fmt.Errorf("Node does not have expected label %s", NodeLabelKey)
+	}
+
+	return &v1.VolumeNodeAffinity{
+		Required: &v1.NodeSelector{
+			NodeSelectorTerms: []v1.NodeSelectorTerm{
+				{
+					MatchExpressions: []v1.NodeSelectorRequirement{
+						{
+							Key:      NodeLabelKey,
+							Operator: v1.NodeSelectorOpIn,
+							Values:   []string{nodeValue},
+						},
+					},
+				},
+			},
+		},
+	}, nil
 }

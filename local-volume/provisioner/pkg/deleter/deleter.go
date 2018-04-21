@@ -31,19 +31,23 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 )
 
+type provisionedVolumeDeleteFuncType func(*v1.PersistentVolume) error
+
 // Deleter handles PV cleanup and object deletion
 // For file-based volumes, it deletes the contents of the directory
 type Deleter struct {
 	*common.RuntimeConfig
-	ProcTable ProcTable
+	ProcTable                   common.ProcTable
+	provisionedVolumeDeleteFunc provisionedVolumeDeleteFuncType
 }
 
 // NewDeleter creates a Deleter object to handle the cleanup and deletion of local PVs
 // allocated by this provisioner
-func NewDeleter(config *common.RuntimeConfig, procTable ProcTable) *Deleter {
+func NewDeleter(config *common.RuntimeConfig, procTable common.ProcTable, provisionedVolumeDeleteFunc provisionedVolumeDeleteFuncType) *Deleter {
 	return &Deleter{
-		RuntimeConfig: config,
-		ProcTable:     procTable,
+		RuntimeConfig:               config,
+		ProcTable:                   procTable,
+		provisionedVolumeDeleteFunc: provisionedVolumeDeleteFunc,
 	}
 }
 
@@ -69,21 +73,21 @@ func (d *Deleter) deletePV(pv *v1.PersistentVolume) error {
 	if pv.Spec.Local == nil {
 		return fmt.Errorf("Unsupported volume type")
 	}
-
-	config, ok := d.DiscoveryMap[pv.Spec.StorageClassName]
-	if !ok {
-		return fmt.Errorf("Unknown storage class name %s", pv.Spec.StorageClassName)
+	var mountConfig common.MountConfig
+	storageSourceConfig, isProvisioned := d.ProvisionSourceMap[pv.Spec.StorageClassName]
+	if isProvisioned {
+		mountConfig = *storageSourceConfig.MountConfig
+	} else {
+		discoveryConfig, isDiscovered := d.DiscoveryMap[pv.Spec.StorageClassName]
+		if !isDiscovered {
+			return fmt.Errorf("Unknown storage class name %s", pv.Spec.StorageClassName)
+		}
+		mountConfig = *discoveryConfig.MountConfig
 	}
 
-	mountPath, err := common.GetContainerPath(pv, config)
+	mountPath, err := common.GetContainerPath(pv, mountConfig)
 	if err != nil {
 		return err
-	}
-
-	// Default is filesystem mode, so even if volume mode is not specified, mode should be filesystem.
-	volMode := v1.PersistentVolumeFilesystem
-	if pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == v1.PersistentVolumeBlock {
-		volMode = v1.PersistentVolumeBlock
 	}
 
 	if d.ProcTable.IsRunning(pv.Name) {
@@ -96,12 +100,12 @@ func (d *Deleter) deletePV(pv *v1.PersistentVolume) error {
 		return err
 	}
 
-	go d.asyncDeletePV(pv, volMode, mountPath, config)
+	go d.asyncDeletePV(pv, mountPath, mountConfig, isProvisioned)
 
 	return nil
 }
 
-func (d *Deleter) asyncDeletePV(pv *v1.PersistentVolume, volMode v1.PersistentVolumeMode, mountPath string, config common.MountConfig) {
+func (d *Deleter) asyncDeletePV(pv *v1.PersistentVolume, mountPath string, config common.MountConfig, shouldDeleteVol bool) {
 	defer d.ProcTable.MarkDone(pv.Name)
 
 	// Make absolutely sure here that we are not deleting anything outside of mounted dir
@@ -112,19 +116,29 @@ func (d *Deleter) asyncDeletePV(pv *v1.PersistentVolume, volMode v1.PersistentVo
 		return
 	}
 
-	var err error
-	switch volMode {
-	case v1.PersistentVolumeFilesystem:
-		err = d.deleteFilePV(pv, mountPath, config)
-	case v1.PersistentVolumeBlock:
+	isDevice, err := d.VolUtil.IsBlock(mountPath)
+	if err != nil {
+		glog.Errorf("Error checking if path %s is of deivce: %v", mountPath, err)
+		return
+	}
+
+	if isDevice {
 		err = d.cleanupBlockPV(pv, mountPath, config)
-	default:
-		err = fmt.Errorf("Unexpected volume mode %q for deleting path %q", volMode, pv.Spec.Local.Path)
+	} else {
+		err = d.deleteFilePV(pv, mountPath, config)
 	}
 
 	if err != nil {
 		glog.Error(err)
 		return
+	}
+
+	// Recycle dynamically provisioned volume behind the PV
+	if shouldDeleteVol {
+		if err := d.provisionedVolumeDeleteFunc(pv); err != nil {
+			glog.Error(err)
+			return
+		}
 	}
 
 	// Remove API object

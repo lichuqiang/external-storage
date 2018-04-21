@@ -39,8 +39,8 @@ type APIUtil interface {
 	// Get StorageClass object
 	GetStorageClass(className string) (*storagev1.StorageClass, error)
 
-	// Update StorageClass object
-	UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error)
+	// Update StorageClass status
+	UpdateStorageClassStatus(class *storagev1.StorageClass) (*storagev1.StorageClass, error)
 
 	// Update PVC object
 	UpdatePVC(pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error)
@@ -73,8 +73,8 @@ func (u *apiUtil) GetStorageClass(className string) (*storagev1.StorageClass, er
 }
 
 // GetStorageClass will update given StorageClass object
-func (u *apiUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
-	return u.client.StorageV1().StorageClasses().Update(class)
+func (u *apiUtil) UpdateStorageClassStatus(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+	return u.client.StorageV1().StorageClasses().UpdateStatus(class)
 }
 
 // UpdatePVC will update given PVC object
@@ -139,7 +139,7 @@ func (u *FakeAPIUtil) GetStorageClass(className string) (*storagev1.StorageClass
 	return class.DeepCopy(), nil
 }
 
-func (u *FakeAPIUtil) UpdateStorageClass(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
+func (u *FakeAPIUtil) UpdateStorageClassStatus(class *storagev1.StorageClass) (*storagev1.StorageClass, error) {
 	if u.shouldFail {
 		return nil, fmt.Errorf("API failed")
 	}

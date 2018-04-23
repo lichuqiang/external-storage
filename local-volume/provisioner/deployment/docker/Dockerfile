@@ -13,12 +13,22 @@
 # limitations under the License.
 
 FROM centos:7
-
+ENV container docker
 RUN yum update -y && \
     yum install -y e2fsprogs && \
     yum install -y hdparm && \
+    yum install -y lvm2 && \
     yum clean all
+
+RUN (cd /lib/systemd/system/sysinit.target.wants/; for i in *; do [ $i == systemd-tmpfiles-setup.service ] || rm -f $i; done); \
+rm -f /lib/systemd/system/multi-user.target.wants/*;\
+rm -f /etc/systemd/system/*.wants/*;\
+rm -f /lib/systemd/system/local-fs.target.wants/*; \
+rm -f /lib/systemd/system/basic.target.wants/*;\
+rm -f /lib/systemd/system/anaconda.target.wants/*;
 
 ADD local-volume-provisioner /local-provisioner
 ADD scripts /scripts
-ENTRYPOINT ["/local-provisioner"]
+ADD local-volume-provisioner.service /usr/lib/systemd/system
+RUN systemctl enable local-volume-provisioner.service
+CMD ["/usr/sbin/init"]

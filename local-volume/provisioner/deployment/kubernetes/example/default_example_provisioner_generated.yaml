@@ -10,10 +10,17 @@ data:
   storageClassMap: |     
     fast-disks:
        hostDir: /mnt/fast-disks
-       mountDir:  /mnt/fast-disks 
+       mountDir:  /mnt/fast-disks
+       volumeMode: Filesystem
        blockCleanerCommand:
          - "/scripts/shred.sh"
-         - "2" 
+         - "2"
+    dynamic-lvm:
+       lvm:
+         volumeGroup: volumeGroup1
+       blockCleanerCommand:
+         - "/scripts/dd_zero.sh"
+         - "2"
 ---
 apiVersion: extensions/v1beta1
 kind: DaemonSet
@@ -49,14 +56,26 @@ spec:
               readOnly: true             
             - mountPath:  /mnt/fast-disks 
               name: fast-disks
-              mountPropagation: "HostToContainer" 
+              mountPropagation: "HostToContainer"
+            - mountPath:  /dev
+              name: lvm-root
+              mountPropagation: "HostToContainer"
+            - mountPath:  /sys
+              name: udev-dep
+              mountPropagation: "HostToContainer"
       volumes:
         - name: provisioner-config
           configMap:
             name: local-provisioner-config         
         - name: fast-disks
           hostPath:
-            path: /mnt/fast-disks 
+            path: /mnt/fast-disks
+        - name: lvm-root
+          hostPath:
+            path: /dev
+        - name: udev-dep
+          hostPath:
+            path: /sys
 
 ---
 # Source: provisioner/templates/provisioner-service-account.yaml

@@ -1,0 +1,10 @@
+[Unit]
+Description=local-volume-provisioner
+Requires=systemd-udevd.service
+
+[Service]
+ExecStart=/local-provisioner
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
